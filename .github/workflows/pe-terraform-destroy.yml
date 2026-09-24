@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           terraform init -reconfigure \
-            -backend-config="key=todo-service/${{ github.repository_owner }}/dev/terraform.tfstate"
+            -backend-config="key=todo-service/${{ github.repository }}/dev/terraform.tfstate"
 
       - name: Terraform Destroy
         working-directory: infra/stacks/dev
