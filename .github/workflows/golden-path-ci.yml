@@ -1,0 +1,144 @@
+name: Golden Path CI
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: Node.js version for lint and test jobs
+        required: false
+        type: string
+        default: "20"
+      terraform_version:
+        description: Terraform version for infrastructure validation
+        required: false
+        type: string
+        default: "1.7.0"
+      run_terraform_plan:
+        description: Run the Checkov and Terraform plan jobs
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  lint:
+    name: Lint backend and frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Lint backend
+        run: npm run lint --workspace=packages/backend
+
+      - name: Lint frontend
+        run: npm run lint --workspace=packages/frontend
+
+  test:
+    name: Backend tests with coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run backend tests with coverage
+        run: npm run test --workspace=packages/backend -- --coverage --coverageReporters=json-summary --coverageReporters=text-summary
+
+      - name: Append coverage summary
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const coverage = JSON.parse(fs.readFileSync('packages/backend/coverage/coverage-summary.json', 'utf8')).total;
+          const summary = [
+            '## Test Coverage',
+            `- Lines: ${coverage.lines.pct}%`,
+            `- Branches: ${coverage.branches.pct}%`,
+            `- Functions: ${coverage.functions.pct}%`,
+            `- Statements: ${coverage.statements.pct}%`,
+          ].join('\n');
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+          NODE
+
+  security-scan:
+    name: Infrastructure security scan
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run_terraform_plan }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Checkov
+        run: python3 -m pip install --disable-pip-version-check checkov
+
+      - name: Run Checkov
+        run: checkov -d infra --framework terraform --compact --soft-fail
+
+  terraform-plan:
+    name: Terraform validation and plan
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run_terraform_plan }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Initialize Terraform without remote state
+        working-directory: infra/stacks/dev
+        run: terraform init -backend=false
+
+      - name: Validate Terraform
+        working-directory: infra/stacks/dev
+        run: terraform validate
+
+      - name: Plan Terraform changes
+        working-directory: infra/stacks/dev
+        continue-on-error: true
+        run: terraform plan -no-color -var-file=terraform.tfvars | tee plan.txt
+
+      - name: Append plan summary
+        if: always()
+        working-directory: infra/stacks/dev
+        run: |
+          {
+            echo '## Terraform Plan'
+            echo
+            sed -n '1,160p' plan.txt 2>/dev/null || echo 'The plan did not produce output.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  docker-build:
+    name: Build Docker images
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -f packages/backend/Dockerfile packages/backend/
+
+      - name: Build frontend image
+        run: docker build -f packages/frontend/Dockerfile packages/frontend/
