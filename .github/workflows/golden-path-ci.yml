@@ -229,7 +229,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   build-and-push:
-    name: Build and publish images
+    name: build-and-push
     runs-on: ubuntu-latest
     if: ${{ inputs.build_and_push }}
     needs: [terraform-apply]
