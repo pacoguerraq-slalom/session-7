@@ -8,7 +8,9 @@
 
 ## Service Context
 
-<!-- Copilot: summarize what the todo-service is and how it will be hosted (from docs/project-overview.md) -->
+The todo-service is a full-stack task management application with a React 18 frontend and a Node.js 20/Express 4 API. The API exposes CRUD endpoints for todos and uses in-memory storage for this lab. The frontend runs on port 3000 and the backend on port 4000.
+
+For the golden path, both components are containerized and deployed to AWS ECS Fargate behind an Application Load Balancer. The platform module creates the VPC and subnets, NAT gateway, ECS cluster with Container Insights, ECR repositories, security groups, CloudWatch log groups, and IAM task roles.
 
 ---
 

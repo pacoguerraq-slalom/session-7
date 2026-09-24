@@ -8,7 +8,9 @@
 
 ## Service Context
 
-<!-- Copilot: summarize the tech stack (Node.js version, test framework, IaC tool) that CI must validate (from docs/project-overview.md) -->
+The todo-service is a full-stack application with a React 18 frontend and a Node.js 20/Express 4 backend managed through npm workspaces. ESLint validates both packages, and Jest tests the backend with global line and branch coverage thresholds of 80% or higher. The service is containerized with Docker.
+
+The infrastructure is defined with Terraform >= 1.5 using the HashiCorp AWS provider ~> 5.0. CI must validate the Terraform dev stack, run Checkov against the infrastructure, and keep the Terraform plan local by initializing with `-backend=false` until OIDC and the remote S3 backend are enabled in Step 3.
 
 ## Reusable Workflow (`golden-path-ci.yml`)
 

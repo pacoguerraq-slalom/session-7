@@ -1,0 +1,284 @@
+name: Golden Path CI
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: Node.js version for lint and test jobs
+        required: false
+        type: string
+        default: "20"
+      terraform_version:
+        description: Terraform version for infrastructure validation
+        required: false
+        type: string
+        default: "1.7.0"
+      run_terraform_plan:
+        description: Run the Checkov and Terraform plan jobs
+        required: false
+        type: boolean
+        default: false
+      run_terraform_apply:
+        description: Apply Terraform using OIDC credentials
+        required: false
+        type: boolean
+        default: false
+      build_and_push:
+        description: Build and publish images to ECR
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      aws_role_arn:
+        description: AWS IAM role ARN for OIDC federation
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  lint:
+    name: Lint backend and frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Lint backend
+        run: npm run lint --workspace=packages/backend
+
+      - name: Lint frontend
+        run: npm run lint --workspace=packages/frontend
+
+  test:
+    name: Backend tests with coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run backend tests with coverage
+        run: npm run test --workspace=packages/backend -- --coverage --coverageReporters=json-summary --coverageReporters=text-summary
+
+      - name: Append coverage summary
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const coverage = JSON.parse(fs.readFileSync('packages/backend/coverage/coverage-summary.json', 'utf8')).total;
+          const summary = [
+            '## Test Coverage',
+            `- Lines: ${coverage.lines.pct}%`,
+            `- Branches: ${coverage.branches.pct}%`,
+            `- Functions: ${coverage.functions.pct}%`,
+            `- Statements: ${coverage.statements.pct}%`,
+          ].join('\n');
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+          NODE
+
+  security-scan:
+    name: Infrastructure security scan
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run_terraform_plan }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Checkov
+        run: python3 -m pip install --disable-pip-version-check checkov
+
+      - name: Run Checkov
+        run: checkov -d infra --framework terraform --compact --soft-fail
+
+  terraform-plan:
+    name: Terraform validation and plan
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run_terraform_plan }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Configure AWS credentials for deployment
+        if: ${{ inputs.run_terraform_apply }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws_role_arn }}
+          aws-region: us-east-1
+
+      - name: Initialize Terraform
+        working-directory: infra/stacks/dev
+        run: |
+          if [[ "${{ inputs.run_terraform_apply }}" == "true" ]]; then
+            terraform init -reconfigure -backend-config="key=todo-service/${{ github.repository }}/dev/terraform.tfstate"
+          else
+            terraform init -backend=false
+          fi
+
+      - name: Validate Terraform
+        working-directory: infra/stacks/dev
+        run: terraform validate
+
+      - name: Plan Terraform changes
+        working-directory: infra/stacks/dev
+        continue-on-error: ${{ !inputs.run_terraform_apply }}
+        run: terraform plan -no-color -var-file=terraform.tfvars -out=tfplan | tee plan.txt
+
+      - name: Append plan summary
+        if: always()
+        working-directory: infra/stacks/dev
+        run: |
+          {
+            echo '## Terraform Plan'
+            echo
+            sed -n '1,160p' plan.txt 2>/dev/null || echo 'The plan did not produce output.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Terraform plan artifact
+        if: ${{ inputs.run_terraform_apply }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: infra/stacks/dev/tfplan
+
+  docker-build:
+    name: Build Docker images
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -f packages/backend/Dockerfile packages/backend/
+
+      - name: Build frontend image
+        run: docker build -f packages/frontend/Dockerfile packages/frontend/
+
+  terraform-apply:
+    name: Apply Terraform infrastructure
+    runs-on: ubuntu-latest
+    if: ${{ inputs.run_terraform_apply }}
+    needs: [terraform-plan]
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws_role_arn }}
+          aws-region: us-east-1
+
+      - name: Initialize Terraform with remote state
+        working-directory: infra/stacks/dev
+        run: terraform init -reconfigure -backend-config="key=todo-service/${{ github.repository }}/dev/terraform.tfstate"
+
+      - name: Download Terraform plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: infra/stacks/dev
+
+      - name: Apply Terraform plan
+        working-directory: infra/stacks/dev
+        run: terraform apply tfplan
+
+      - name: Write deployment summary
+        working-directory: infra/stacks/dev
+        run: |
+          {
+            echo '## Deployment complete'
+            echo
+            echo "| Output | Value |"
+            echo "| --- | --- |"
+            echo "| Service URL | $(terraform output -raw service_url) |"
+            echo "| Cluster | $(terraform output -raw cluster_name) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-and-push:
+    name: Build and publish images
+    runs-on: ubuntu-latest
+    if: ${{ inputs.build_and_push }}
+    needs: [terraform-apply]
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws_role_arn }}
+          aws-region: us-east-1
+
+      - name: Initialize Terraform with remote state
+        working-directory: infra/stacks/dev
+        run: terraform init -reconfigure -backend-config="key=todo-service/${{ github.repository }}/dev/terraform.tfstate"
+
+      - name: Resolve ECR repositories
+        id: ecr-repositories
+        working-directory: infra/stacks/dev
+        run: |
+          echo "backend_repo=$(terraform output -raw backend_ecr_repository_url)" >> "$GITHUB_OUTPUT"
+          echo "frontend_repo=$(terraform output -raw frontend_ecr_repository_url)" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend image
+        run: |
+          docker build -t "${{ steps.ecr-repositories.outputs.backend_repo }}:${{ github.sha }}" -t "${{ steps.ecr-repositories.outputs.backend_repo }}:latest" -f packages/backend/Dockerfile packages/backend/
+          docker push "${{ steps.ecr-repositories.outputs.backend_repo }}:${{ github.sha }}"
+          docker push "${{ steps.ecr-repositories.outputs.backend_repo }}:latest"
+
+      - name: Build and push frontend image
+        run: |
+          docker build -t "${{ steps.ecr-repositories.outputs.frontend_repo }}:${{ github.sha }}" -t "${{ steps.ecr-repositories.outputs.frontend_repo }}:latest" -f packages/frontend/Dockerfile packages/frontend/
+          docker push "${{ steps.ecr-repositories.outputs.frontend_repo }}:${{ github.sha }}"
+          docker push "${{ steps.ecr-repositories.outputs.frontend_repo }}:latest"
+
+      - name: Trigger ECS deployment
+        run: |
+          cluster=$(terraform -chdir=infra/stacks/dev output -raw cluster_name)
+          service=$(aws ecs list-services --cluster "$cluster" --query 'serviceArns[0]' --output text | xargs -I{} aws ecs describe-services --cluster "$cluster" --services {} --query 'services[0].serviceName' --output text)
+          aws ecs update-service --cluster "$cluster" --service "$service" --force-new-deployment
