@@ -18,3 +18,7 @@ jobs:
     with:
       node_version: "20"
       run_terraform_plan: true
+      run_terraform_apply: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      build_and_push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    secrets:
+      aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}

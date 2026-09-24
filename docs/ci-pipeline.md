@@ -53,4 +53,4 @@ The reusable workflow also accepts `terraform_version` and can disable the Terra
 
 ## Permissions and Secrets
 
-Both workflow files declare explicit permissions. The caller requests `id-token: write` so a later OIDC-enabled deployment can receive a short-lived AWS token; the current Step 2 checks do not use AWS credentials. Step 3 will add the `AWS_ROLE_ARN` repository secret as a reusable-workflow secret input when Terraform apply and image publishing are enabled.
+Both workflow files declare explicit permissions. The caller requests `id-token: write`, and passes the `AWS_ROLE_ARN` repository secret to the reusable workflow as `aws_role_arn`. Terraform apply and image publishing use that secret to receive short-lived AWS credentials through OIDC only on pushes to `main`.
